@@ -1,299 +1,375 @@
-```md id="tcp-ns3-report-22521"
-# ĐÁNH GIÁ HIỆU NĂNG TCP NEWRENO VÀ TCP CUBIC TRONG MẠNG CÓ NGHẼN SỬ DỤNG NS-3
+# ĐÁNH GIÁ VÀ SO SÁNH HIỆU NĂNG CÁC THUẬT TOÁN TCP CONGESTION CONTROL (NEWRENO VÀ CUBIC) TRONG MÔI TRƯỜNG MẠNG CÓ NGHẼN SỬ DỤNG NS-3
+
+---
 
 ## 1. Giới thiệu
 
-Trong mạng máy tính, hiện tượng tắc nghẽn xảy ra khi lưu lượng dữ liệu vượt quá khả năng xử lý của mạng, dẫn đến mất gói, tăng độ trễ và giảm hiệu năng truyền tải.
+### 1.1 Bối cảnh
 
-TCP sử dụng các thuật toán điều khiển tắc nghẽn (Congestion Control) để điều chỉnh tốc độ gửi dữ liệu. Hai thuật toán phổ biến là:
+Trong các hệ thống mạng hiện đại, đặc biệt là Internet, việc truyền tải dữ liệu giữa các thiết bị đầu cuối phụ thuộc rất lớn vào giao thức TCP (Transmission Control Protocol). TCP đảm bảo truyền dữ liệu tin cậy thông qua cơ chế kiểm soát lỗi, kiểm soát luồng và đặc biệt là **điều khiển tắc nghẽn (Congestion Control)**.
 
-- TCP NewReno: cải tiến từ Reno, xử lý tốt multiple packet loss
-- TCP Cubic: tối ưu cho mạng tốc độ cao, sử dụng hàm cubic
+Tắc nghẽn mạng xảy ra khi lưu lượng dữ liệu vượt quá khả năng xử lý của các thiết bị trung gian (router, switch), dẫn đến:
+- Mất gói (packet loss)
+- Tăng độ trễ (delay)
+- Giảm thông lượng (throughput)
 
-Đề tài này sử dụng NS-3 để mô phỏng và so sánh hiệu năng của hai thuật toán trong điều kiện mạng có bottleneck.
-
----
-
-## 2. Mô hình mô phỏng
-
-### 2.1 Kiến trúc mạng
-
-Mô hình được xây dựng như sau:
-
-```
-
-Sender1 
-Sender2 ----> Router1 ----> Router2 ----> Receiver
-...      /
-
-````id="topo-ns3"
-
-- N sender tạo nhiều luồng TCP
-- Router1 ↔ Router2 là bottleneck
-- Receiver nhận dữ liệu
+Do đó, việc thiết kế các thuật toán điều khiển tắc nghẽn hiệu quả là yếu tố then chốt để tối ưu hiệu năng mạng.
 
 ---
 
-### 2.2 Cấu hình mạng trong code
+### 1.2 Lý do chọn đề tài
 
-#### 2.2.1 Node
+Hiện nay tồn tại nhiều thuật toán TCP Congestion Control khác nhau, mỗi thuật toán có cách tiếp cận và hiệu năng khác nhau trong các điều kiện mạng khác nhau.
 
-```cpp
-NodeContainer senders, routers, receiver;
-senders.Create(numFlows);
-routers.Create(2);
-receiver.Create(1);
-````
+Cụ thể:
+- TCP NewReno: cải tiến từ Reno, phổ biến trong hệ thống truyền thống
+- TCP Cubic: được sử dụng mặc định trong Linux, tối ưu cho mạng tốc độ cao
 
-* `numFlows`: số luồng TCP (có thể thay đổi bằng CLI)
+Tuy nhiên, chưa có cái nhìn trực quan về:
+- Sự khác biệt hiệu năng giữa hai thuật toán
+- Khả năng thích ứng trong môi trường có nghẽn
+- Mức độ công bằng khi nhiều luồng cạnh tranh
 
----
-
-#### 2.2.2 Link
-
-**Access link (không nghẽn):**
-
-```cpp
-100 Mbps, 2 ms
-```
-
-**Bottleneck link:**
-
-```cpp
-rate = bottleneckRate (default: 5Mbps)
-delay = bottleneckDelay (default: 50ms)
-```
+Vì vậy, đề tài này được thực hiện nhằm làm rõ các vấn đề trên thông qua mô phỏng bằng NS-3.
 
 ---
 
-#### 2.2.3 Địa chỉ IP
+### 1.3 Mục tiêu nghiên cứu
 
-* Sender → Router1: `10.1.x.0/24`
-* Bottleneck: `10.1.100.0/24`
-* Router2 → Receiver: `10.1.200.0/24`
-
----
-
-### 2.3 Cấu hình TCP
-
-```cpp
-Config::SetDefault("ns3::TcpL4Protocol::SocketType",
-    TypeIdValue(TypeId::LookupByName("ns3::" + tcpVariant)));
-```
-
-Có thể chọn:
-
-* TcpNewReno
-* TcpCubic
+- Xây dựng mô hình mạng có liên kết nghẽn (bottleneck)
+- Triển khai TCP NewReno và TCP Cubic
+- Đánh giá các chỉ số:
+  - Throughput
+  - Delay
+  - Packet loss
+  - Fairness
+- So sánh và đưa ra nhận xét
 
 ---
 
-## 3. Sinh lưu lượng
-
-### 3.1 Ứng dụng gửi
-
-```cpp
-BulkSendHelper src("ns3::TcpSocketFactory", ...);
-src.SetAttribute("MaxBytes", UintegerValue(0));
-```
-
-* Gửi dữ liệu **liên tục (infinite)**
-* Bắt đầu từ 1s → 20s
+## 2. Cơ sở lý thuyết
 
 ---
 
-### 3.2 Ứng dụng nhận
+### 2.1 Khái niệm tắc nghẽn mạng
 
-```cpp
-PacketSinkHelper sink(...)
-```
+Tắc nghẽn xảy ra khi:
 
-* Nhận toàn bộ dữ liệu TCP
+Tổng lưu lượng vào > khả năng xử lý của router
 
----
-
-## 4. Thu thập dữ liệu
-
-Sử dụng:
-
-```cpp
-FlowMonitorHelper fm;
-```
-
-Các chỉ số được tính:
+Ví dụ thực tế:
+- 10 máy cùng tải file qua 1 đường truyền 5Mbps
+→ Router không xử lý kịp → queue đầy → drop packet
 
 ---
 
-### 4.1 Throughput
+### 2.2 Nguyên lý TCP Congestion Control
 
-```cpp
-throughput = (rxBytes * 8) / time
-```
+TCP sử dụng biến:
 
-(đơn vị Mbps)
+- **cwnd (Congestion Window)**: số lượng dữ liệu tối đa có thể gửi
 
 ---
 
-### 4.2 Delay
+#### Các pha chính:
 
-```cpp
-delay = delaySum / rxPackets
-```
+### a. Slow Start
+- cwnd tăng theo cấp số nhân
+- mục tiêu: nhanh chóng tận dụng băng thông
 
----
-
-### 4.3 Packet Loss
-
-```cpp
-lostPackets
-```
+Ví dụ:
+- cwnd = 1 → 2 → 4 → 8 → 16
 
 ---
 
-### 4.4 Fairness Index (Jain)
-
-Công thức:
-
-Fairness = (Σxi)^2 / (n * Σxi^2)
-
-Trong code:
-
-```cpp
-double fairness = (sum * sum) / (throughputs.size() * sumSq);
-```
+### b. Congestion Avoidance
+- cwnd tăng tuyến tính
+- tránh gây nghẽn
 
 ---
 
-## 5. Kịch bản thí nghiệm
+### c. Khi phát hiện mất gói
 
-Chạy chương trình với các tham số:
+TCP coi mất gói là dấu hiệu tắc nghẽn:
 
-```bash
-./ns3 run "scratch/tcp-comparison --tcpVariant=TcpNewReno --rate=5Mbps --delay=50ms --flows=2"
-```
-
-Các biến thay đổi:
-
-* TCP variant: NewReno / Cubic
-* Bottleneck bandwidth: 5Mbps, 10Mbps
-* Delay: 20ms – 100ms
-* Số flows: 1, 2, 5
+- Giảm cwnd
+- Giảm tốc độ gửi
 
 ---
 
-## 6. Phân tích code quan trọng
+## 2.3 TCP NewReno
 
-### 6.1 Bottleneck tạo nghẽn
+### Đặc điểm
 
-```cpp
-PointToPointHelper bottleneck;
-bottleneck.SetDeviceAttribute("DataRate", StringValue(bottleneckRate));
-```
-
-👉 Đây là nơi **cố tình tạo nghẽn mạng**
+- Cải tiến từ TCP Reno
+- Xử lý tốt multiple packet loss
 
 ---
 
-### 6.2 Multi-flow competition
+### Cơ chế hoạt động
 
-```cpp
-senders.Create(numFlows);
-```
-
-👉 Các luồng cạnh tranh băng thông → đánh giá fairness
+Khi nhận duplicate ACK:
+- Retransmit packet
+- Giảm cwnd (thường chia đôi)
 
 ---
 
-### 6.3 Lọc flow không hợp lệ
+### Ví dụ
 
-```cpp
-if (t.sourceAddress == Ipv4Address("10.1.200.2"))
-    continue;
-```
+Giả sử:
+- cwnd = 16
 
-👉 Loại bỏ flow từ receiver
+Khi mất gói:
+→ cwnd = 8
 
----
-
-### 6.4 Tính throughput từng flow
-
-```cpp
-double throughput = (flow.second.rxBytes * 8.0 / time) / 1024 / 1024;
-```
+→ tăng lại từ từ
 
 ---
 
-## 7. Kết quả và nhận xét
+### Ưu điểm
+
+- Ổn định
+- Fairness tốt
+
+### Nhược điểm
+
+- Tăng trưởng chậm
+- Không tận dụng tốt mạng tốc độ cao
+
+---
+
+## 2.4 TCP Cubic
+
+### Ý tưởng chính
+
+Thay vì tăng tuyến tính, Cubic dùng hàm bậc ba:
+
+cwnd(t) = C(t - K)^3 + Wmax
+
+---
+
+### Ý nghĩa
+
+- Khi xa điểm nghẽn → tăng nhanh
+- Gần điểm nghẽn → tăng chậm lại
+
+---
+
+### Ví dụ trực quan
+
+- NewReno: tăng đều từng bước
+- Cubic: tăng nhanh → chậm lại → ổn định
+
+---
+
+### Ưu điểm
+
+- Tận dụng tốt băng thông lớn
+- Phù hợp mạng backbone, data center
+
+---
+
+### Nhược điểm
+
+- Có thể gây mất gói nhiều hơn
+- Fairness không cao
+
+---
+
+## 3. Ứng dụng thực tiễn
+
+---
+
+### 3.1 TCP NewReno
+
+Được sử dụng trong:
+- Hệ thống cũ
+- Mạng có độ ổn định cao
+- Môi trường yêu cầu fairness
+
+Ví dụ:
+- Mạng doanh nghiệp nội bộ
+- Hệ thống truyền dữ liệu nhỏ
+
+---
+
+### 3.2 TCP Cubic
+
+Được sử dụng trong:
+- Linux (mặc định)
+- Data center
+- Cloud computing
+
+Ví dụ:
+- Truyền video (YouTube, Netflix)
+- Download file lớn
+- Backup dữ liệu
+
+---
+
+### 3.3 Ý nghĩa so sánh
+
+Giúp:
+- Chọn thuật toán phù hợp
+- Tối ưu hệ thống mạng
+- Hiểu rõ hành vi TCP
+
+---
+
+## 4. Mô hình mô phỏng (NS-3)
+
+---
+
+### 4.1 Kiến trúc mạng
+``
+Multiple Senders → Router1 → Router2 → Receiver
+``
+- Bottleneck nằm giữa Router1 và Router2
+
+---
+
+### 4.2 Ý nghĩa bottleneck
+
+Giả lập:
+
+- Đường truyền yếu
+- Router quá tải
+- Điều kiện mạng thực tế
+
+---
+
+### 4.3 Cấu hình từ code
+
+- Access link: 100Mbps, 2ms
+- Bottleneck: 5Mbps, 50ms
+- Số flow: thay đổi
+
+---
+
+### 4.4 Sinh lưu lượng
+
+- BulkSend → gửi liên tục
+- PacketSink → nhận dữ liệu
+
+---
+
+## 5. Phương pháp đánh giá
+
+---
+
+### 5.1 Throughput
+
+Lượng dữ liệu nhận được:
+
+Throughput = (rxBytes × 8) / time
+
+---
+
+### 5.2 Delay
+
+Delay trung bình:
+
+Delay = delaySum / packets
+
+---
+
+### 5.3 Packet Loss
+
+Số gói bị mất trong quá trình truyền
+
+---
+
+### 5.4 Fairness (Jain Index)
+
+Fairness = (Σxi)^2 / (n Σxi^2)
+
+---
+
+### Ví dụ
+
+3 flow:
+- 5 Mbps, 5 Mbps, 5 Mbps → fairness = 1 (tốt)
+- 10 Mbps, 0 Mbps, 0 Mbps → fairness thấp
+
+---
+
+## 6. Phân tích hoạt động hệ thống
+
+---
+
+### 6.1 Khi số flow tăng
+
+- Các flow cạnh tranh băng thông
+- Xuất hiện nghẽn tại bottleneck
+
+---
+
+### 6.2 Hành vi NewReno
+
+- Giảm cwnd mạnh khi mất gói
+- Tăng lại chậm
+
+→ ổn định nhưng chậm
+
+---
+
+### 6.3 Hành vi Cubic
+
+- Tăng nhanh
+- Dễ chiếm băng thông
+
+→ throughput cao nhưng có thể unfair
+
+---
+
+## 7. Kết quả kỳ vọng
+
+---
 
 ### 7.1 Throughput
 
-* TCP Cubic thường đạt throughput cao hơn
-* TCP NewReno tăng trưởng chậm hơn
+- Cubic > NewReno
 
 ---
 
 ### 7.2 Delay
 
-* Cubic có delay cao hơn khi aggressive
-* NewReno ổn định hơn
+- Cubic ≥ NewReno
 
 ---
 
 ### 7.3 Packet Loss
 
-* Cubic dễ gây mất gói khi tăng nhanh
-* NewReno giảm cwnd mạnh → ít loss hơn
+- Cubic ≥ NewReno
 
 ---
 
 ### 7.4 Fairness
 
-* NewReno → công bằng hơn
-* Cubic → có thể chiếm băng thông
+- NewReno > Cubic
 
 ---
 
 ## 8. Kết luận
 
-* TCP NewReno:
-
-  * Ổn định
-  * Fairness tốt
-  * Phù hợp mạng nhỏ
-
-* TCP Cubic:
-
-  * Throughput cao
-  * Phù hợp mạng tốc độ cao
-  * Trade-off delay và loss
+- Không có thuật toán tốt nhất tuyệt đối
+- Lựa chọn phụ thuộc:
+  - Loại mạng
+  - Yêu cầu hệ thống
 
 ---
 
-## 9. Hạn chế
+## 9. Hướng phát triển
 
-* Chưa xét:
-
-  * Queue discipline (RED, CoDel)
-  * TCP BBR
-  * Mạng thực tế
+- So sánh với TCP BBR
+- Áp dụng AI tối ưu congestion control
+- Thử nghiệm trên mạng thực
 
 ---
 
-## 10. Hướng phát triển
+## 10. Tài liệu tham khảo
 
-* Thêm TCP BBR
-* So sánh nhiều thuật toán hơn
-* Áp dụng ML để adaptive congestion control
-
----
-
-## 11. Tài liệu tham khảo
-
-* NS-3 Documentation
-* GeeksforGeeks - TCP Congestion Control
-* RFC 5681
-
-```
-
-
-
+- NS-3 Official Documentation
+- RFC 5681
+- Linux TCP Cubic Paper
+- GeeksforGeeks TCP Congestion Control
